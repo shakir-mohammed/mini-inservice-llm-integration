@@ -1,107 +1,97 @@
-Chosen LLM track: Spår A — LLM log-/incidentanalys.
-Selected because it best demonstrates operational robustness, evidence-based analysis, and safe LLM usage with deterministic fallback under failure conditions.
+# LLM & Operations Notes
 
-Configuration
-Required environment variables:
+## Chosen LLM track
 
-env
+**Track A — LLM log / incident analysis**
 
-PORT=3000
-API_KEY=dev-secret-key
-Optional environment variables for LLM support:
+This track best demonstrates operational maturity by improving support and incident
+triage without making the system dependent on the LLM.
 
-env
+---
 
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o-mini
-LLM_TIMEOUT_MS=15000
-If OPENAI_API_KEY is not configured, or if the LLM call fails or times out, the service
-automatically falls back to deterministic analysis.
+## What the LLM is used for (and why)
 
-Authentication
-All endpoints require an API key sent via the request header:
+The LLM is used only in `POST /analyze-logs` to:
 
-X-API-Key: <API_KEY>
-Missing keys result in 401 Unauthorized.
-Invalid keys result in 403 Forbidden.
+- Summarize incidents
+- Identify likely causes
+- Point to concrete evidence in logs
+- Suggest next operational steps
+- Draft a customer-facing response
 
-API usage examples
-Health check:
+This reduces manual triage time for support and ops teams while keeping the system
+deterministic and safe.
 
-bash
+---
 
-curl http://localhost:3000/health \
- -H 'X-API-Key: dev-secret-key'
-Ingest event:
+## How hallucinations / guessing are minimized
 
-bash
+Several safeguards are applied:
 
-curl -X POST http://localhost:3000/events \
- -H 'Content-Type: application/json' \
- -H 'X-API-Key: dev-secret-key' \
- -d '{
-"customer_id": "abc123",
-"timestamp": "2026-01-18T10:00:00Z",
-"type": "order_created",
-"payload": {
-"order_id": "o-991",
-"amount": 123.45
-}
-}'
-Status (last 10 minutes):
+1. **Strict prompting rules**
+   - Analyze only the provided logs
+   - Do not guess if evidence is missing
+   - Every cause must cite explicit log fragments
 
-bash
+2. **Low temperature**
+   - The LLM is called with `temperature = 0` to reduce speculative output
 
-curl "http://localhost:3000/status?customer_id=abc123" \
- -H 'X-API-Key: dev-secret-key'
-Analyze logs (LLM track A):
+3. **Schema validation**
+   - LLM output must be valid JSON
+   - Output must match a strict schema
+   - Invalid output is rejected
 
-bash
+4. **Deterministic fallback**
+   - If the LLM fails (timeout, invalid JSON, schema mismatch),
+     the service falls back to a heuristic analyzer that always produces valid output
 
-curl -X POST http://localhost:3000/analyze-logs \
- -H 'Content-Type: application/json' \
- -H 'X-API-Key: dev-secret-key' \
- -d "$(jq -Rs '{logs: .}' logs.sample.txt)"
-The analyze-logs endpoint returns structured JSON containing a summary of the incident,
-likely causes with explicit evidence from the input logs, suggested next steps, missing
-observability, and a draft customer-facing message.
+The LLM is treated as **untrusted input**, never as a source of truth.
 
-Error handling
-The API returns clear and predictable error responses:
+---
 
-400 for validation errors with machine-readable details
+## PII & security handling
 
-401 / 403 for authentication failures
+- API keys are stored only in environment variables
+- Request bodies and sensitive headers are redacted from logs
+- Logs sent to the LLM should be pre-filtered to avoid secrets or PII
+- The LLM is instructed not to repeat full payloads or sensitive values
 
-500 only for unexpected internal errors
+In production, additional masking of known PII patterns would be applied before sending
+data to an external model.
 
-Logging and observability
-The service uses structured logging. Logs include customer_id when available, endpoint,
-HTTP status code, and failure reason. LLM execution outcomes (success, timeout, fallback)
-are also logged. Sensitive data such as API keys and request bodies are redacted from logs.
+---
 
-Design notes and tradeoffs
-Events are stored in-memory and compacted by time to keep the implementation simple and
-fast within the timebox. Persistence (for example SQLite or a database) is a deliberate
-TODO.
+## How this would run in production
 
-Authentication is implemented using a single API key provided via environment variable
-to keep the integration surface minimal.
+**Cost**
 
-The LLM is treated as untrusted input. All LLM output must be valid JSON, match a strict
-schema, and provide explicit evidence from the input logs. If any of these checks fail,
-the service falls back to deterministic analysis to ensure reliability.
+- LLM usage is optional and on-demand
+- Smaller model by default
+- Can be fully disabled without breaking functionality
 
-Timeouts, schema validation, and fallback behavior ensure the service remains operational
-even if the LLM is slow or unavailable.
+**Rate limiting**
 
-Test strategy
-Manual API contract testing is demonstrated via the curl examples above. Deterministic
-fallback guarantees that the analyze-logs endpoint always returns valid output. Unit
-tests for time-window logic and schema validation would be the next step, but are out of
-scope for the given timebox.
+- Per API key / per customer limits
+- Ideally enforced at API gateway or Fastify plugin level
 
-Notes
-AI assistance was used during development. All LLM output is treated as untrusted and is
-validated before use. Deterministic fallbacks ensure the service remains reliable and
-operable even when the LLM is unavailable.
+**Caching**
+
+- Hash log input → short-lived cache to avoid repeated LLM calls during incidents
+
+**Timeout & fallback**
+
+- Hard timeout on LLM requests
+- Automatic fallback to deterministic analysis
+
+**Scaling**
+
+- Stateless service
+- Suitable for containerized deployment (ECS, Cloud Run, Kubernetes)
+
+---
+
+## Notes on development
+
+AI assistance was used during development.  
+All LLM output is treated as untrusted and validated before use. Deterministic fallback
+behavior ensures the service remains operable even when the LLM is unavailable.
